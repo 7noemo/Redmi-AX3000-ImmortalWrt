@@ -100,6 +100,8 @@ jobs:
           CONFIG_PACKAGE_ipq-wifi-redmi_ax3000=y
           CONFIG_PACKAGE_luci=y
           CONFIG_LUCI_LANG_zh_Hans=y
+          CONFIG_PACKAGE_kmod-tcp-bbr=y
+          CONFIG_PACKAGE_kmod-sched=y
           "
           for sym in $need; do
             if grep -qx "$sym" .config; then
@@ -109,6 +111,26 @@ jobs:
               fail=1
             fi
           done
+          # The A/B install path only works if nothing pins the UBI device and
+          # slot B stays writable. Both are easy to reintroduce by accident.
+          DTS=target/linux/qualcommax/dts/ipq5018-redmi-ax3000.dts
+          if grep -q 'ubi.mtd=' "$DTS"; then
+            echo "::error::$DTS pins ubi.mtd - the boot slot flag would be ignored"
+            fail=1
+          else
+            echo "  OK   no ubi.mtd pin in DTS (bootloader decides the slot)"
+          fi
+          if sed -n '/label = "rootfs_1"/,/};/p' "$DTS" | grep -q 'read-only'; then
+            echo "::error::rootfs_1 is read-only - ubiformat would fail with EROFS"
+            fail=1
+          else
+            echo "  OK   rootfs_1 writable"
+          fi
+          if grep -q 'conduit "wan" "eth0"' target/linux/qualcommax/ipq50xx/base-files/etc/board.d/02_network; then
+            echo "  OK   wan -> eth0 (gmac0, matches ax5400/pz-l8)"
+          else
+            echo "::warning::wan conduit is not eth0 - check the DSA port mapping"
+          fi
           # qca8k is built into the kernel (NET_DSA_QCA8K), not a kmod package
           if grep -qE "^CONFIG_NET_DSA_QCA8K=y" .config; then
             echo "  OK   CONFIG_NET_DSA_QCA8K=y (in-kernel DSA)"

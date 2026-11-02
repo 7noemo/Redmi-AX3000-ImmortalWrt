@@ -96,10 +96,17 @@ make -j$(nproc)
 
 要求**原厂分区表**（22 个分区，`rootfs` 在 `0xa80000`，36 MiB）和原厂 U-Boot。
 
-- 固件写入 **slot A**（mtd18 `rootfs`），slot B 保持只读不动
-- 想回原厂：小米维修工具 + 刷回 mtd1/mtd11/mtd12，路还在
+原厂固件跑在 **slot A**，所以第一次安装只能写 **slot B**（`rootfs_1`），不能覆盖正在运行的系统：
 
-首次写入用 factory UBI，之后正常 `sysupgrade`。
+```sh
+ubiformat /dev/mtd19 -f openwrt-...-squashfs-factory.ubi -y   # mtd19 = rootfs_1
+```
+
+（分区号以 `cat /proc/mtd` 为准，`rootfs` / `rootfs_1` 是哪两个请自己确认。）
+写完后让 U-Boot 切到 B 槽启动；之后升级走 `sysupgrade`，A/B 双槽互为回退。
+
+- DTS 里 **没有** 固定 `ubi.mtd`，由原厂 U-Boot 按启动标志传入，这样才能真正从 B 槽起来
+- `rootfs_1` 也**没有**标 `read-only`，否则 `ubiformat` 会直接 `EROFS` 失败
 
 > **刷机有风险。第一次写之前先做完整 NAND 备份。**
 
