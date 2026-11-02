@@ -183,7 +183,10 @@ jobs:
             echo "::error::image prefix is not Redmi-branded (ra81-support out of date?)"
             fail=1
           fi
-          if grep -q 'model = "Redmi AX3000' target/linux/qualcommax/dts/ipq5018-redmi-ax3000.dts; then
+          # master 把 dts 挪到了 dts/，24.10/25.12 还在 files/arch/arm64/boot/dts/qcom/
+          DTS=target/linux/qualcommax/dts/ipq5018-redmi-ax3000.dts
+          [ -f "$DTS" ] || DTS=target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq5018-redmi-ax3000.dts
+          if grep -q 'model = "Redmi AX3000' "$DTS"; then
             echo "  OK   dts model = Redmi AX3000 (RA81)"
           else
             echo "::error::dts model string is not Redmi AX3000"
@@ -199,7 +202,7 @@ jobs:
           # The A/B install path only works if nothing pins the UBI device and
           # slot B stays writable. Both are easy to reintroduce by accident.
           # Only look at real code: the comment above chosen{} mentions ubi.mtd.
-          DTS=target/linux/qualcommax/dts/ipq5018-redmi-ax3000.dts
+          # $DTS 已在上面的品牌检查里按布局解析好了
           if grep -v '^\s*\(\*\|/\*\)' "$DTS" | grep -q 'bootargs.*ubi\.mtd='; then
             echo "::error::$DTS pins ubi.mtd - the boot slot flag would be ignored"
             fail=1
