@@ -98,7 +98,6 @@ jobs:
           CONFIG_PACKAGE_kmod-ath11k-ahb=y
           CONFIG_PACKAGE_ath11k-firmware-ipq5018-qcn6122=y
           CONFIG_PACKAGE_ipq-wifi-redmi_ax3000=y
-          CONFIG_PACKAGE_kmod-qca8k=y
           CONFIG_PACKAGE_luci=y
           CONFIG_LUCI_LANG_zh_Hans=y
           "
@@ -110,9 +109,11 @@ jobs:
               fail=1
             fi
           done
-          # kmod-qca8k may be built-in under DSA; accept the built-in form too
-          if ! grep -qE "CONFIG_PACKAGE_kmod-qca8k=y|CONFIG_PACKAGE_kmod-dsa-qca8k=y" .config; then
-            echo "::warning::qca8k dsa kmod not selected explicitly (may be built into the target)"
+          # qca8k is built into the kernel (NET_DSA_QCA8K), not a kmod package
+          if grep -qE "^CONFIG_NET_DSA_QCA8K=y" .config; then
+            echo "  OK   CONFIG_NET_DSA_QCA8K=y (in-kernel DSA)"
+          else
+            echo "::warning::NET_DSA_QCA8K not set - switch ports will not appear"
           fi
           exit $fail
 
