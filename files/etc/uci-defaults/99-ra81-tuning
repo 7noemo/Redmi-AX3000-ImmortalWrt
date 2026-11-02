@@ -1,0 +1,77 @@
+#!/bin/sh
+#
+# Redmi AX3000 (RA81) - software datapath tuning
+#
+# RA81 has gigabit-only ports (1 WAN + 3 LAN). IPQ5018 dual-core A53 does
+# plain software NAT at ~1.2-1.5 Gbps, i.e. already above the ~940 Mbps a
+# 1GbE link can carry. So the win is not raw forwarding, it is:
+#
+#   1. flow offloading  - skip the full stack for established flows
+#   2. BBR              - better throughput on high-RTT paths
+#   3. RPS/XPS          - spread softirq across both cores
+#
+# Note: flow offloading and SQM/CAKE do not mix. SQM needs to see every
+# packet to shape it, flowtable bypasses that. If you enable SQM in LuCI,
+# turn flow offloading off (LuCI does this automatically).
+
+. /lib/functions.sh
+
+log() { logger -t ra81-tuning "$*"; echo "$*"; }
+
+# ---------------------------------------------------------- flow offload ----
+# Software flowtable: first packet goes through the stack, the rest take the
+# fast path. No hardware/NSS involvement (see NSS-FEASIBILITY.md).
+if uci -q get firewall.@defaults[0] >/dev/null 2>&1; then
+	uci -q set firewall.@defaults[0].flow_offloading='1'
+	# hardware offload is not available on this target - keep it off
+	uci -q set firewall.@defaults[0].flow_offloading_hw='0'
+	uci -q commit firewall
+	log "flow offloading: enabled (software)"
+fi
+
+# --------------------------------------------------------------- sysctl -----
+mkdir -p /etc/sysctl.d
+cat > /etc/sysctl.d/99-ra81-tuning.conf <<'EOF'
+# BBR congestion control + fq qdisc: matters on WAN links with real RTT
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+
+# Backlog sized for 1GbE with GRO; defaults are conservative
+net.core.netdev_max_backlog=16384
+net.core.somaxconn=1024
+
+# Keep conntrack from becoming the bottleneck under many flows
+net.netfilter.nf_conntrack_max=65536
+EOF
+
+# apply now (sysctl.d is read on boot; be explicit for this first boot)
+sysctl -q -p /etc/sysctl.d/99-ra81-tuning.conf 2>/dev/null || {
+	log "sysctl apply failed, will take effect on next boot"
+}
+
+# ----------------------------------------------------------------- RPS/XPS ---
+# IPQ5018 has 2 cores. Pin receive processing of the ethernet devices to CPU1
+# so CPU0 stays free for the forwarding path, and set XPS to match.
+ncpu=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 2)
+[ "$ncpu" -ge 2 ] || ncpu=2
+
+# mask of all cpus except cpu0
+mask=$(printf '%x' $(( (1 << ncpu) - 1 & ~1 )) 2>/dev/null || echo 2)
+
+for dev in /sys/class/net/*; do
+	name=$(basename "$dev")
+	case "$name" in
+		lo|ifb*|br-*|docker*|veth*|wlan*|phy*) continue ;;
+	esac
+
+	for q in "$dev"/queues/rx-*/rps_cpus; do
+		[ -w "$q" ] && echo "$mask" > "$q" 2>/dev/null
+	done
+	for q in "$dev"/queues/tx-*/xps_cpus; do
+		[ -w "$q" ] && echo "$mask" > "$q" 2>/dev/null
+	done
+	log "RPS/XPS $name -> mask $mask"
+done
+
+log "tuning applied"
+exit 0

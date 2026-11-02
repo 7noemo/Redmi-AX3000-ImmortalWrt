@@ -38,7 +38,23 @@ lan1/lan2/lan3/wan = DSA ports
 > 对 RA81 这种**全千兆口**的机器，实际损失很小：stmmac + 软件 NAT 已经能跑满
 > 千兆线速。NSS 真正的价值在 Wi-Fi offload 和 2.5G/万兆口。
 >
-> 要做 NSS，只能落到 6.12 分支，见 NSS 实验仓。
+> 四条可能的 NSS 路线（master / 25.12 / 5.15+NSS11.4 / qosmio fork）全部查证过，
+> 没有一条能交付，证据与推理见
+> **[ra81-support/NSS-FEASIBILITY.md](https://github.com/7noemo/ra81-support/blob/main/NSS-FEASIBILITY.md)**。
+
+### 替代方案：软件数据面调优
+
+`99-ra81-tuning` 首次启动时自动做四件事，对千兆口的实际收益比 NSS 更明显：
+
+| 项 | 作用 |
+|----|------|
+| flow offloading（软件 flowtable） | 已建立连接走快路径，NAT 转发贴近线速 |
+| BBR + fq | 高 RTT 链路吞吐提升 |
+| RPS/XPS | 软中断分到两个核，避免单核打满 |
+| SQM/CAKE（LuCI 可选） | 抑制 bufferbloat —— 影响体验的是延迟不是峰值 |
+
+> flow offload 与 SQM/CAKE 互斥：SQM 需要看到每个包。开 SQM 时 LuCI 会自动关掉
+> flow offload。
 
 ## 2.4 GHz 与 board_id
 
