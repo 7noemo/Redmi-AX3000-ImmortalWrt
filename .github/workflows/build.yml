@@ -93,6 +93,11 @@ jobs:
           cd openwrt
           # append, do not replace: upstream may add/remove default feeds
           cat "$GITHUB_WORKSPACE/$FEEDS_APPEND" >> feeds.conf.default
+          # scripts/feeds 解析用的是 s/#.+$//，裸 “#” 行不算注释，会直接
+          # 报 Syntax error；这里兜一下，防止以后手抖加了个空注释行。
+          sed -i '/^[[:space:]]*#\+[[:space:]]*$/d' feeds.conf.default
+          echo "=== feeds.conf.default ==="
+          cat feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
