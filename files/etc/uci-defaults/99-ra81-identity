@@ -1,0 +1,23 @@
+#!/bin/sh
+#
+# Redmi AX3000 (RA81) - 默认主机名
+#
+# LuCI 的「型号」来自设备树（/tmp/sysinfo/model = Redmi AX3000 (RA81)），
+# 主机名则来自 /etc/config/system，默认是 ImmortalWrt。这里在首次启动时
+# 换成本机型号，DHCP 客户端列表、浏览器标签页、ssh 提示符都能一眼认出是哪台。
+#
+# uci-defaults 只在首次启动执行一次，之后用户在 LuCI 里改的值不会被覆盖。
+
+[ -f /etc/config/system ] || exit 0
+
+cur=$(uci -q get system.@system[0].hostname)
+
+case "$cur" in
+	""|ImmortalWrt|OpenWrt)
+		uci -q set system.@system[0].hostname='Redmi-AX3000'
+		uci -q commit system
+		logger -t ra81-identity "hostname -> Redmi-AX3000"
+		;;
+esac
+
+exit 0

@@ -3,7 +3,24 @@
 用 **ImmortalWrt master（内核 6.18）** 编译红米 AX3000，而不是厂商 QSDK 分支。
 
 板级支持在独立仓 **[ra81-support](https://github.com/7noemo/ra81-support)**，
-本仓只负责：拉源码 → 注入板级支持 → 编译 → 出固件。
+本仓只负责：拉源码 → 注入板级支持 → 编译 → 出固件 → 发 Release。
+
+## 固件身份（型号 / 镜像名 / Release）
+
+同一台机器在四个地方露名字，必须一致，改名时四处一起改：
+
+| 位置 | 值 | 来源 |
+|------|----|------|
+| LuCI 概览「型号」 | `Redmi AX3000 (RA81)` | 设备树 `model`（ra81-support） |
+| 设备列表 / profiles.json | `Redmi AX3000 (RA81)` | `DEVICE_VENDOR/MODEL/VARIANT` |
+| 镜像文件名 | `ImmortalWrt-Redmi-AX3000-*.bin` | `DEVICE_IMG_PREFIX` |
+| 默认主机名 | `Redmi-AX3000` | `files/etc/uci-defaults/99-ra81-identity` |
+| Actions 产物 / Release | `ImmortalWrt-Redmi-AX3000-<分支>-<日期>` | 本仓 workflow |
+
+上游默认会给出 `immortalwrt-qualcommax-ipq50xx-redmi_ax3000-...` 这种以目标名开头的
+镜像名，看不出是哪台机器，所以这里用 `DEVICE_IMG_PREFIX` 钉成零售型号。
+
+每次构建成功都会自动发 **Release**（保留最新 5 个），里面就是可直接刷的四件套。
 
 ---
 
@@ -84,13 +101,15 @@ git clone https://github.com/7noemo/ra81-support.git
 git clone https://github.com/immortalwrt/immortalwrt.git -b master openwrt
 ./ra81-support/scripts/install-into-openwrt.sh openwrt
 cp -r files/. openwrt/files/
+cat feeds.conf.append >> openwrt/feeds.conf.default      # 追加 passwall2 前端 feed
 cd openwrt
 ./scripts/feeds update -a && ./scripts/feeds install -a
+python3 ../scripts/trim-feeds.py .                       # geoip 换 lite / 去掉 geoview
 cp ../configs/ra81.config .config && make defconfig
 make -j$(nproc)
 ```
 
-产物：`bin/targets/qualcommax/ipq50xx/*redmi*ax3000*`
+产物：`bin/targets/qualcommax/ipq50xx/ImmortalWrt-Redmi-AX3000-*`
 
 ## 刷机
 
@@ -99,7 +118,7 @@ make -j$(nproc)
 原厂固件跑在 **slot A**，所以第一次安装只能写 **slot B**（`rootfs_1`），不能覆盖正在运行的系统：
 
 ```sh
-ubiformat /dev/mtd19 -f openwrt-...-squashfs-factory.ubi -y   # mtd19 = rootfs_1
+ubiformat /dev/mtd19 -f ImmortalWrt-Redmi-AX3000-squashfs-factory.ubi -y   # mtd19 = rootfs_1
 ```
 
 （分区号以 `cat /proc/mtd` 为准，`rootfs` / `rootfs_1` 是哪两个请自己确认。）
@@ -112,14 +131,39 @@ ubiformat /dev/mtd19 -f openwrt-...-squashfs-factory.ubi -y   # mtd19 = rootfs_1
 
 ## 首次启动
 
+- 主机名默认 `Redmi-AX3000`，LuCI 概览型号 `Redmi AX3000 (RA81)`
 - 无线默认：CN / 2.4G ch6 HE40 / 5G ch36 HE160（按频段识别，不按 radio 序号）
 - 诊断：`ra81-wifi-diag`，贴恩山/提 issue 时请附上它的输出
 - LuCI 中文已内置（通过 `CONFIG_LUCI_LANG_zh_Hans`，不是直接列 i18n 包）
 
 ## 预置软件
 
-LuCI + 中文、防火墙、TTYD 终端、SQM、WOL、DDNS、UPnP、Argon 主题、
-BBR、USB 存储（ext4/exfat）、iperf3、ethtool、tcpdump、htop、curl、sftp-server。
+36 MiB 的槽位（内核 + squashfs + /overlay 共用）决定了每一项都要算体积。
+
+| 类别 | 内容 |
+|------|------|
+| 界面 | LuCI + 中文 + Argon 主题、TTYD 终端、防火墙、OPKG |
+| **翻墙** | **PassWall 2 + Xray**（nftables 透明代理，DNS 走 chinadns-ng + dnsmasq nftset） |
+| 网络 | SQM/CAKE、DDNS、UPnP、WOL、流量统计(nlbwmon)、BBR+fq、flow offloading |
+| 诊断 | iperf3、ethtool、tcpdump、mtr、htop、curl、sftp-server |
+
+为腾出空间**去掉**的东西：USB 存储整套（`kmod-usb-storage` / `uas` / `ext4` / `exfat`
+/ `block-mount` / `automount`）—— RA81 没有 USB 口；以及 PassWall 的 sing-box /
+haproxy / ss-rust / v2ray-plugin / geoview（Xray 一个芯核已覆盖 vmess/vless/trojan/ss）。
+
+### 翻墙这块为什么这么省
+
+| 项 | 上游默认 | 本固件 | 省下 |
+|----|----------|--------|------|
+| 芯核 | sing-box + Xray + haproxy + ss-rust + ssr + obfs | 仅 Xray | ~18 MiB |
+| geoip.dat | v2fly 全量（装完 22 MiB） | MetaCubeX `geoip-lite`（0.2 MiB，只含 CN+私有网段） | ~21 MiB |
+| geoview | 硬依赖（Go，装完 5 MiB） | 摘掉依赖（运行时可选：`[ -z "$(first_type geoview)" ] && enable_geoview_ip=0`） | ~5 MiB |
+
+`scripts/trim-feeds.py` 负责后两项改写，结构对不上会直接报错退出，
+不会静默产出超尺寸镜像；CI 里还有 34 MiB 的尺寸守卫。
+
+> 副作用：没有 geoview 就不能用「按 GeoIP 解析分流」这类高级分流，
+> 常规的「绕过大陆」/「全局」/ 按域名分流不受影响。
 
 ## 许可证
 

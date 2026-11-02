@@ -1,0 +1,10 @@
+# 追加到 immortalwrt 的 feeds.conf.default 后面（CI 里用 cat >> 追加，
+# 不覆盖上游列表，上游加 feed 时这里不用跟着改）。
+#
+# 只引入 passwall2 的 LuCI 前端。xray-core / v2ray-geodata / chinadns-ng /
+# tcping / geoview / lyaml 全部由 immortalwrt 自带 feeds 提供 —— 不要重复
+# 引入 passwall-packages，否则 xray-core、v2ray-geodata 会出现两份同名包，
+# 安装阶段会以非零码退出（23.05 那版踩过这个坑）。
+#
+# 钉 commit：第三方 feed 被 force-push 也不会把构建搞挂。
+src-git passwall2 https://github.com/Openwrt-Passwall/openwrt-passwall2.git^8c67190debee97bc2b3d68c3e41521ba9ddea3b5

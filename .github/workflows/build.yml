@@ -17,6 +17,7 @@ on:
       - "configs/**"
       - "scripts/**"
       - "files/**"
+      - "feeds.conf.append"
       - ".github/workflows/build.yml"
   schedule:
     # weekly, Monday 03:00 UTC - keeps a fresh image without rebuilding daily
@@ -26,11 +27,23 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+# needed by the release step
+permissions:
+  contents: write
+
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt.git
   REPO_BRANCH: ${{ github.event.inputs.source_branch || 'master' }}
   BOARD_SUPPORT: https://github.com/7noemo/ra81-support.git
   CONFIG_FILE: configs/ra81.config
+  FEEDS_APPEND: feeds.conf.append
+  # ---- 固件身份：镜像名 / 产物名 / Release 标题都从这里来 ----
+  DEVICE_NAME: Redmi AX3000
+  DEVICE_CODENAME: RA81
+  IMAGE_PREFIX: ImmortalWrt-Redmi-AX3000
+  # rootfs 槽位 0x02400000 = 36 MiB；镜像超过 34 MiB 就没法留出 /overlay
+  ROOTFS_SLOT_MIB: 36
+  IMAGE_LIMIT_MIB: 34
   TZ: Asia/Shanghai
 
 jobs:
@@ -54,14 +67,14 @@ jobs:
           sudo apt-get install -y -qq build-essential clang flex bison g++ gawk \
             gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
             python3 python3-setuptools python3-yaml rsync unzip zlib1g-dev \
-            file wget subversion device-tree-compiler swig
+            file wget subversion device-tree-compiler swig patch pkg-config
 
       - name: Clone ImmortalWrt (${{ env.REPO_BRANCH }})
         run: |
           git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL" openwrt
           cd openwrt
           echo "HEAD: $(git log --oneline -1)"
-          echo "KERNEL: $(grep -m1 KERNEL_PATCHVER target/linux/qualcommax/Makefile)"
+          echo "KERNEL: $(awk '/^KERNEL_PATCHVER/{sub(/^[^=]*=/,"");print}' target/linux/qualcommax/Makefile)"
 
       - name: Install RA81 board support
         run: |
@@ -71,13 +84,36 @@ jobs:
           mkdir -p openwrt/files
           cp -rv files/. openwrt/files/
           chmod 0755 openwrt/files/etc/uci-defaults/99-ra81-wifi \
+                       openwrt/files/etc/uci-defaults/99-ra81-tuning \
+                       openwrt/files/etc/uci-defaults/99-ra81-identity \
                        openwrt/files/usr/sbin/ra81-wifi-diag
 
-      - name: Update and install feeds
+      - name: Add proxy feed and install all feeds
         run: |
           cd openwrt
+          # append, do not replace: upstream may add/remove default feeds
+          cat "$GITHUB_WORKSPACE/$FEEDS_APPEND" >> feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+
+      - name: Trim feeds for the 36 MiB rootfs slot
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/trim-feeds.py" "$GITHUB_WORKSPACE/openwrt"
+
+      - name: Fail fast if the proxy packages are missing
+        run: |
+          cd openwrt
+          fail=0
+          for p in luci-app-passwall2 xray-core v2ray-geoip v2ray-geosite \
+                   chinadns-ng tcping lyaml luci-compat; do
+            if ls -d package/feeds/*/"$p" >/dev/null 2>&1; then
+              echo "  OK   $p"
+            else
+              echo "::error::package $p is not in any feed - feeds install did not get it"
+              fail=1
+            fi
+          done
+          exit $fail
 
       - name: Load config
         run: |
@@ -85,7 +121,9 @@ jobs:
           cp "$GITHUB_WORKSPACE/$CONFIG_FILE" .config
           make defconfig
           echo "=== device selection ==="
-          grep -E "CONFIG_TARGET_qualcommax.*DEVICE_redmi_ax3000" .config || true
+          grep -E "DEVICE_redmi_ax3000" .config || true
+          echo "=== proxy core selection (must be Xray only) ==="
+          grep -E "passwall2_(Basic|Nftables|Iptables|INCLUDE)|PACKAGE_xray-core=" .config || true
 
       - name: Verify critical symbols
         run: |
@@ -102,6 +140,15 @@ jobs:
           CONFIG_LUCI_LANG_zh_Hans=y
           CONFIG_PACKAGE_kmod-tcp-bbr=y
           CONFIG_PACKAGE_kmod-sched=y
+          CONFIG_PACKAGE_luci-app-passwall2=y
+          CONFIG_PACKAGE_luci-app-passwall2_Basic_Core_Xray=y
+          CONFIG_PACKAGE_luci-app-passwall2_Nftables_Transparent_Proxy=y
+          CONFIG_PACKAGE_xray-core=y
+          CONFIG_PACKAGE_v2ray-geoip=y
+          CONFIG_PACKAGE_v2ray-geosite=y
+          CONFIG_PACKAGE_dnsmasq_full_nftset=y
+          CONFIG_PACKAGE_kmod-nft-tproxy=y
+          CONFIG_PACKAGE_kmod-nft-socket=y
           "
           for sym in $need; do
             if grep -qx "$sym" .config; then
@@ -111,6 +158,37 @@ jobs:
               fail=1
             fi
           done
+          # 这些东西是体积杀手：只要被默认选项偷偷拉进来，36 MiB 就爆了
+          for sym in CONFIG_PACKAGE_sing-box CONFIG_PACKAGE_geoview \
+                     CONFIG_PACKAGE_haproxy CONFIG_PACKAGE_shadowsocks-rust-sslocal \
+                     CONFIG_PACKAGE_v2ray-plugin CONFIG_PACKAGE_simple-obfs-client; do
+            if grep -qx "$sym=y" .config; then
+              echo "::error::$sym got pulled in - it does not fit in 36 MiB"
+              fail=1
+            else
+              echo "  OK   $sym off"
+            fi
+          done
+          # 品牌/型号必须落到镜像名上
+          if grep -q "DEVICE_IMG_PREFIX := ImmortalWrt-Redmi-AX3000" target/linux/qualcommax/image/ipq50xx.mk; then
+            echo "  OK   image prefix = ImmortalWrt-Redmi-AX3000"
+          else
+            echo "::error::image prefix is not Redmi-branded (ra81-support out of date?)"
+            fail=1
+          fi
+          if grep -q 'model = "Redmi AX3000' target/linux/qualcommax/dts/ipq5018-redmi-ax3000.dts; then
+            echo "  OK   dts model = Redmi AX3000 (RA81)"
+          else
+            echo "::error::dts model string is not Redmi AX3000"
+            fail=1
+          fi
+          # geoip 必须是 lite 版，否则 22 MiB 的 geoip.dat 直接撑爆槽位
+          if grep -q "geoip-lite.dat" feeds/packages/net/v2ray-geodata/Makefile; then
+            echo "  OK   geoip = MetaCubeX lite"
+          else
+            echo "::error::v2ray-geodata still ships the full 22 MiB geoip.dat"
+            fail=1
+          fi
           # The A/B install path only works if nothing pins the UBI device and
           # slot B stays writable. Both are easy to reintroduce by accident.
           # Only look at real code: the comment above chosen{} mentions ubi.mtd.
@@ -157,27 +235,111 @@ jobs:
           mkdir -p out
           cd openwrt/bin/targets/qualcommax/ipq50xx
           ls -lh
-          cp -v *redmi*ax3000* "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
-          cp -v *profile*.json sha256sums "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
-          # manifest doubles as the "what actually shipped" record
-          cp -v *.manifest "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
+          cp -v "$IMAGE_PREFIX"* "$GITHUB_WORKSPACE/out/"
+          # the .manifest is named after IMG_PREFIX (not DEVICE_IMG_PREFIX), so
+          # rename it to match the images it describes
+          for f in *.manifest; do
+            [ -e "$f" ] && cp -v "$f" "$GITHUB_WORKSPACE/out/$IMAGE_PREFIX.manifest"
+          done
+          cp -v profiles.json sha256sums "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
           echo "=== artifacts ==="
           ls -lh "$GITHUB_WORKSPACE/out/"
 
-      - name: Wi-Fi package audit
+      - name: Image size guard (36 MiB rootfs slot)
+        run: |
+          set -e
+          img=$(ls out/*squashfs-sysupgrade.bin | head -1)
+          [ -n "$img" ] || { echo "::error::no sysupgrade image produced"; exit 1; }
+          sz=$(stat -c%s "$img")
+          mib=$((sz / 1024 / 1024))
+          echo "sysupgrade: $((sz / 1024)) KiB (${mib} MiB)"
+          limit=$((IMAGE_LIMIT_MIB * 1024 * 1024))
+          if [ "$sz" -gt "$limit" ]; then
+            echo "::error::image is ${mib} MiB, over the ${IMAGE_LIMIT_MIB} MiB budget - /overlay would be ~0"
+            exit 1
+          fi
+          slot=$((ROOTFS_SLOT_MIB * 1024 * 1024))
+          echo "overlay estimate: $(( (slot - sz) / 1024 )) KiB free in the ${ROOTFS_SLOT_MIB} MiB slot"
+          echo "IMAGE_KIB=$((sz / 1024))" >> "$GITHUB_ENV"
+          echo "OVERLAY_KIB=$(( (slot - sz) / 1024 ))" >> "$GITHUB_ENV"
+
+      - name: Manifest audit
         run: |
           f=$(ls openwrt/bin/targets/qualcommax/ipq50xx/*.manifest | head -1)
           [ -n "$f" ] || { echo "::error::no manifest"; exit 1; }
-          echo ">>> ath11k / bdf / luci audit"
+          echo ">>> 镜像内容审计"
           for p in ath11k-firmware-ipq5018-qcn6122 ipq-wifi-redmi_ax3000 \
-                   kmod-ath11k-ahb luci-i18n-base-zh-cn; do
+                   kmod-ath11k-ahb luci-i18n-base-zh-cn \
+                   luci-app-passwall2 xray-core v2ray-geoip v2ray-geosite \
+                   chinadns-ng; do
             if grep -q "^$p " "$f"; then echo "  OK   $p"; else echo "::warning::not in image: $p"; fi
           done
+          for p in sing-box geoview haproxy; do
+            if grep -q "^$p " "$f"; then echo "::error::$p is in the image (space hog)"; else echo "  OK   $p absent"; fi
+          done
+          echo ">>> package count: $(wc -l < "$f")"
+          # kernel version for the release notes
+          KVER=$(awk '$1=="kernel"{print $3}' "$f" | head -1 | cut -d'~' -f1)
+          echo "KERNEL_VER=${KVER:-unknown}" >> "$GITHUB_ENV"
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: immortalwrt-ra81-${{ env.REPO_BRANCH }}-${{ github.run_number }}
+          name: ${{ env.IMAGE_PREFIX }}-${{ env.REPO_BRANCH }}-${{ github.run_number }}
           path: out/*
           if-no-files-found: error
           retention-days: 30
+
+      - name: Build release notes
+        id: notes
+        run: |
+          stamp=$(date +%Y.%m.%d-%H%M)
+          echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
+          REV=$(tr -d '\n' < openwrt/bin/targets/qualcommax/ipq50xx/version.buildinfo 2>/dev/null || true)
+          {
+            echo "## 红米 AX3000（Redmi AX3000 / RA81）"
+            echo ""
+            echo "- 平台：Qualcomm IPQ5018 + QCA8337 交换 + QCN6102（5G，WCSS multipd）"
+            echo "- 系统：ImmortalWrt \`$REPO_BRANCH\`，内核 **${KERNEL_VER}**（主线 ath11k，无 NSS）"
+            echo "- 版本号：\`${REV:-unknown}\`"
+            echo "- 镜像：${IMAGE_KIB} KiB，36 MiB 槽位内还剩约 ${OVERLAY_KIB} KiB 给 /overlay"
+            echo ""
+            echo "### 预装"
+            echo "- 中文界面（LuCI + Argon 主题）、防火墙、TTYD、SQM、DDNS、UPnP、WOL、流量统计"
+            echo "- **PassWall 2 + Xray**（nftables 透明代理；geoip 用 MetaCubeX lite 版）"
+            echo "- BBR + fq、flow offloading、RPS/XPS（首次启动自动配置）"
+            echo ""
+            echo "### 刷机"
+            echo "\`\`\`sh"
+            echo "# 原厂固件在 slot A，第一次只能写 slot B（rootfs_1）"
+            echo "ubiformat /dev/mtd19 -f ${IMAGE_PREFIX}-squashfs-factory.ubi -y"
+            echo "\`\`\`"
+            echo "之后升级走 sysupgrade，A/B 双槽互为回退。分区号以 \`cat /proc/mtd\` 为准。"
+            echo ""
+            echo "> 刷机有风险，第一次写之前先做完整 NAND 备份。详见 README。"
+          } > release.md
+          echo "--- release.md ---"
+          cat release.md
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.IMAGE_PREFIX }}-${{ env.REPO_BRANCH }}-${{ steps.notes.outputs.stamp }}
+          name: "红米 AX3000 (RA81) · ImmortalWrt ${{ env.REPO_BRANCH }} · ${{ steps.notes.outputs.stamp }}"
+          body_path: release.md
+          files: out/*
+          fail_on_unmatched_files: true
+
+      # keep the releases page readable: 5 newest, everything else goes
+      - name: Prune old releases
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[5:] | .[].tagName' \
+          | while read -r tag; do
+              [ -n "$tag" ] || continue
+              echo "deleting $tag"
+              gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+            done
