@@ -108,8 +108,10 @@ jobs:
       - name: Fail fast if the proxy packages are missing
         run: |
           cd openwrt
+          # 注意：feeds install 链接的是「包目录」，v2ray-geoip / v2ray-geosite
+          # 是 v2ray-geodata 目录里的两个子包，目录名只有 v2ray-geodata。
           fail=0
-          for p in luci-app-passwall2 xray-core v2ray-geoip v2ray-geosite \
+          for p in luci-app-passwall2 xray-core v2ray-geodata \
                    chinadns-ng tcping lyaml luci-compat; do
             if ls -d package/feeds/*/"$p" >/dev/null 2>&1; then
               echo "  OK   $p"
