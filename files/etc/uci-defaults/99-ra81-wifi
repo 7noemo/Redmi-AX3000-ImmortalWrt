@@ -1,0 +1,79 @@
+#!/bin/sh
+#
+# Redmi AX3000 (RA81) - first boot radio defaults
+#
+# Why band-based and not index-based:
+#   radio0/radio1 ordering depends on probe order and on whether the QCN6102
+#   userpd came up before or after the built-in 2.4G radio. Hardcoding
+#   "radio0 = 2.4G" is exactly how people end up with a 160MHz channel 36
+#   setting applied to the 2.4G radio. We ask the phy what it supports.
+#
+# Applied once (uci-defaults semantics: this file is removed after a
+# successful run). Users can change everything afterwards in LuCI.
+
+. /lib/functions.sh
+
+LOG_TAG="ra81-wifi"
+log() { logger -t "$LOG_TAG" "$*"; echo "$*"; }
+
+[ -f /etc/config/wireless ] || exit 0
+
+# Does this phy have a 2.4GHz channel?
+phy_is_2g() {
+	local phy="$1"
+	iw phy "$phy" info 2>/dev/null | grep -qE "24(1[2-9]|[2-9][0-9]) MHz"
+}
+
+set_radio_2g() {
+	local section="$1"
+	uci -q set "wireless.$section.country='CN'"
+	uci -q set "wireless.$section.channel='6'"
+	uci -q set "wireless.$section.htmode='HE40'"
+	uci -q set "wireless.$section.band='2g'"
+	# 40MHz on 2.4G only makes sense on a clean channel; keep it optional
+	uci -q set "wireless.$section.noscan='0'"
+	log "2.4G  -> $section: CN ch6 HE40"
+}
+
+set_radio_5g() {
+	local section="$1"
+	uci -q set "wireless.$section.country='CN'"
+	uci -q set "wireless.$section.channel='36'"
+	uci -q set "wireless.$section.htmode='HE160'"
+	uci -q set "wireless.$section.band='5g'"
+	log "5G    -> $section: CN ch36 HE160"
+}
+
+configure_radio() {
+	local section="$1"
+	local phy device band
+
+	config_get phy "$section" phy
+	config_get device "$section" path
+	[ -n "$phy" ] || return 0
+
+	if phy_is_2g "$phy"; then
+		set_radio_2g "$section"
+	else
+		set_radio_5g "$section"
+	fi
+}
+
+config_load wireless
+config_foreach configure_radio wifi-device
+
+# Fallback: if no phy was resolvable (wifi not up yet), apply by convention.
+# IPQ5018 exposes the built-in 2.4G radio first, the QCN6102 userpd second.
+if ! uci -q show wireless | grep -q "htmode"; then
+	log "no phy resolved, falling back to radio index order"
+	set_radio_2g radio0
+	set_radio_5g radio1
+fi
+
+uci -q commit wireless
+
+# Make sure the radios actually start with the new settings
+wifi reload >/dev/null 2>&1 || wifi up >/dev/null 2>&1
+
+log "radio defaults applied"
+exit 0

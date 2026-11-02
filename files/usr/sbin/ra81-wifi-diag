@@ -1,0 +1,71 @@
+#!/bin/sh
+#
+# ra81-wifi-diag - one shot field diagnostic for Redmi AX3000 (RA81)
+#
+# Run after boot:   ra81-wifi-diag
+# Save for a bug report:  ra81-wifi-diag > /tmp/ra81.txt 2>&1
+
+echo "===== RA81 Wi-Fi diagnostic ====="
+echo "date      : $(date)"
+echo "board     : $(cat /tmp/sysinfo/board_name 2>/dev/null || echo unknown)"
+echo "model     : $(cat /tmp/sysinfo/model 2>/dev/null || echo unknown)"
+echo "kernel    : $(uname -r)"
+echo "firmware  : $(. /etc/openwrt_release 2>/dev/null; echo "$DISTRIB_DESCRIPTION")"
+echo
+
+echo "----- ethernet / DSA -----"
+ip -br link 2>/dev/null | sed 's/^/  /'
+echo "  switch ports:"
+for p in lan1 lan2 lan3 wan; do
+	[ -e "/sys/class/net/$p" ] && echo "    $p: $(cat /sys/class/net/$p/address 2>/dev/null) $(cat /sys/class/net/$p/operstate 2>/dev/null)"
+done
+echo
+
+echo "----- NAND partitions -----"
+cat /proc/mtd 2>/dev/null | sed 's/^/  /'
+echo
+
+echo "----- firmware / BDF -----"
+for f in /lib/firmware/ath11k/IPQ5018/hw1.0/board-2.bin \
+	 /lib/firmware/ath11k/QCN6122/hw1.0/board-2.bin; do
+	if [ -e "$f" ]; then
+		echo "  OK   $f ($(stat -c %s "$f" 2>/dev/null) bytes)"
+	else
+		echo "  MISS $f"
+	fi
+done
+ls -l /lib/firmware/ath11k/IPQ5018/hw1.0/ 2>/dev/null | sed 's/^/  /'
+ls -l /lib/firmware/ath11k/QCN6122/hw1.0/ 2>/dev/null | sed 's/^/  /'
+echo
+
+echo "----- ath11k state -----"
+for d in /sys/class/ieee80211/*; do
+	[ -e "$d" ] || continue
+	echo "  phy: $(basename "$d")  mac: $(cat "$d/macaddress" 2>/dev/null)"
+done
+echo "  dmesg (ath11k / qmi / board):"
+dmesg 2>/dev/null | grep -iE "ath11k|qmi|board_id|qcn|wcss" | tail -40 | sed 's/^/    /'
+echo
+
+echo "----- radios -----"
+iw dev 2>/dev/null | sed 's/^/  /'
+echo "  bands per phy:"
+for d in /sys/class/ieee80211/*; do
+	[ -e "$d" ] || continue
+	p=$(basename "$d")
+	b2=$(iw phy "$p" info 2>/dev/null | grep -cE "24(1[2-9]|[2-9][0-9]) MHz")
+	b5=$(iw phy "$p" info 2>/dev/null | grep -cE "5[0-9]{3} MHz")
+	b6=$(iw phy "$p" info 2>/dev/null | grep -cE "59[0-9]{2} MHz")
+	echo "    $p: 2g=$b2 5g=$b5 6g=$b6"
+done
+echo
+
+echo "----- wireless config -----"
+uci -q show wireless | sed 's/^/  /'
+echo
+
+echo "----- recent wifi log -----"
+logread 2>/dev/null | grep -iE "ra81-wifi|hostapd|wpa_supplicant" | tail -25 | sed 's/^/  /'
+echo
+
+echo "===== end ====="
